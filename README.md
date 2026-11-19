@@ -99,3 +99,23 @@ individual outcomes for failure analysis (`planning_failed`, `collision`, or
 
 The separate Gazebo example opens the committed layout; the automated
 evaluator generates independent layouts for its statistical runs.
+
+## Level 3: moving pedestrians
+
+Level 3 uses the same A*/RRT + DWB paired-trial display, status messages, result
+table, and `x` prompt as Level 1. Run its three processes in separate sourced
+terminals after rebuilding the package:
+
+```bash
+# Terminal 1: Gazebo world, robot, bridges, and moving pedestrians
+ros2 launch vehicle_description level3_sim.launch.py
+
+# Terminal 2: live top-down Python map
+ros2 launch vehicle_description level3_visualizer.launch.py
+
+# Terminal 3: paired trials
+python3 src/PAAN/run_level3.py --ros2 --trials 3
+```
+
+The trial runner writes `level3_results.csv` and `level3_results.json`. Between
+paired trials it holds the completed scene until `x` is pressed.

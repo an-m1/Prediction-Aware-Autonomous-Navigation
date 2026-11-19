@@ -11,6 +11,7 @@ import csv
 import json
 import math
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -31,6 +32,30 @@ CLUTTER = {"moderate": (3, 4), "dense": (5, 6)}
 GAZEBO_OBSTACLE_SIZES = ((1.4, 1.0), (0.9, 1.5), (1.6, 0.9),
                          (1.0, 1.8), (1.4, 1.1), (1.0, 1.3),
                          (0.75, 1.0), (1.2, 0.8), (1.8, 1.2), (1.5, 1.6))
+
+
+def wait_for_next_trial(trial_index, total_trials):
+    """Keep the completed scene visible until the operator presses x."""
+    if trial_index >= total_trials:
+        return
+    if not sys.stdin.isatty():
+        print("[WARN] No interactive terminal; continuing to the next trial.")
+        return
+    print(f"\n[PAUSED] Trial {trial_index} is complete. Press x to set up trial {trial_index + 1}.")
+    try:
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        previous = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            while sys.stdin.read(1).lower() != "x":
+                pass
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+    except ImportError:
+        while input("Type x then Enter to continue: ").strip().lower() != "x":
+            pass
 
 
 def generate_level2_map_pgm(pgm_path, obstacles, resolution=RES):
@@ -121,7 +146,12 @@ def clearance(x, y, obstacles):
 
 
 def execute(name, planner, controller, sc, seed, max_time=120,
-            planned_path=None, planning_latency=None, visualizer=None, gazebo_mover=None):
+            planned_path=None, planning_latency=None, visualizer=None, gazebo_mover=None,
+            level=2, trial_index=None, dynamic_provider=None, report_status=True):
+    planner_label = "A*" if name == "AStar" else name
+    status_prefix = f"Level {level}: trial {trial_index}" if trial_index else f"Level {level}"
+    if report_status:
+        print(f"[STATUS] Planning with {planner_label} ({status_prefix}).")
     if planned_path is None:
         t0 = time.perf_counter()
         path = planner.plan(sc["start"], sc["goal"], seed=seed) if name == "RRT" else planner.plan(sc["start"], sc["goal"])
@@ -132,10 +162,13 @@ def execute(name, planner, controller, sc, seed, max_time=120,
             "completion_time_s": max_time, "path_length_m": 0.0, "min_clearance_m": 0.0,
             "tracking_error_rms_m": 0.0}
     if not path or len(path) < 2:
+        if report_status:
+            print(f"[STATUS] {planner_label}, {status_prefix}: no collision-free global path found.")
         return base
     path = planner.resample_path(path, 0.1)
     arr = np.asarray(path)
     length = float(np.linalg.norm(np.diff(arr, axis=0), axis=1).sum())
+    base["path_length_m"] = length
     heading = math.atan2(path[1][1] - path[0][1], path[1][0] - path[0][0])
     pose, vel = (*sc["start"], heading), (0.0, 0.0)
     if gazebo_mover:
@@ -143,20 +176,38 @@ def execute(name, planner, controller, sc, seed, max_time=120,
                                     pose[2], world_name="level2_world")
     if visualizer:
         visualizer.publish_pose(*pose)
+    if report_status:
+        print(f"[STATUS] Currently moving towards goal using {planner_label}+DWB "
+              f"at {CRUISE:.2f} m/s ({status_prefix}).")
+    next_status = 5.0
     min_clear, errors, idx = float("inf"), [], 0
     steps = int(max_time / 0.1)
     for step in range(steps):
         x, y, th = pose
         clear = clearance(x, y, sc["obstacles"])
+        dynamic_obstacles = dynamic_provider(step * 0.1) if dynamic_provider else []
+        for pedestrian in dynamic_obstacles:
+            clear = min(clear, math.hypot(x - pedestrian["x"], y - pedestrian["y"])
+                        - RADIUS - pedestrian.get("radius", 0.25))
+        if visualizer and dynamic_obstacles and hasattr(visualizer, "publish_pedestrians"):
+            visualizer.publish_pedestrians(dynamic_obstacles)
         min_clear = min(min_clear, clear)
         if clear <= 0:
             base.update(failure_reason="collision", min_clearance_m=min_clear)
+            if report_status:
+                print(f"[STATUS] {planner_label}+DWB, {status_prefix}: stopped for collision.")
             return base
         if math.dist((x, y), sc["goal"]) <= controller.goal_tolerance:
             base.update(success=True, failure_reason="", completion_time_s=step * 0.1,
                         min_clearance_m=min_clear,
                         tracking_error_rms_m=float(np.sqrt(np.mean(np.square(errors)))) if errors else 0.0)
+            if report_status:
+                print(f"[STATUS] {planner_label}+DWB, {status_prefix}: goal reached in {step * 0.1:.1f} s.")
             return base
+        if report_status and step * 0.1 >= next_status:
+            print(f"[STATUS] {planner_label}+DWB, {status_prefix}: "
+                  f"{math.dist((x, y), sc['goal']):.2f} m remaining after {step * 0.1:.1f} s.")
+            next_status += 5.0
         errors.append(float(np.min(np.hypot(arr[:, 0] - x, arr[:, 1] - y))))
         v, w, info = controller.compute_velocity_commands(pose, vel, path, dt=0.1, last_waypoint_idx=idx)
         idx = info.get("waypoint_idx", idx)
@@ -169,6 +220,8 @@ def execute(name, planner, controller, sc, seed, max_time=120,
                                         pose[2], world_name="level2_world")
             time.sleep(0.1)
     base.update(failure_reason="timeout", min_clearance_m=min_clear)
+    if report_status:
+        print(f"[STATUS] {planner_label}+DWB, {status_prefix}: timed out after {max_time:.1f} s.")
     return base
 
 
@@ -211,7 +264,10 @@ def summarize(pairs):
             both = [r for r in group if r["astar_success"] and r["rrt_success"]]
             try:
                 from scipy.stats import wilcoxon
-                p = float(wilcoxon([r[f"astar_{key}"] for r in both], [r[f"rrt_{key}"] for r in both]).pvalue) if both else None
+                paired_a = np.asarray([r[f"astar_{key}"] for r in both], dtype=float)
+                paired_r = np.asarray([r[f"rrt_{key}"] for r in both], dtype=float)
+                nonzero = paired_a != paired_r
+                p = float(wilcoxon(paired_a[nonzero], paired_r[nonzero]).pvalue) if np.any(nonzero) else 1.0
             except (ImportError, ValueError):
                 p = None
             metrics[key] = {"astar_median": float(np.median(av)) if av.size else None,
@@ -296,10 +352,24 @@ def main():
             raise SystemExit("ROS 2 Python packages are unavailable. Source install/setup.bash first.") from exc
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    rows, sensitivity, repeats = [], [], []
+    rows, sensitivity, repeats, evaluation_cases = [], [], [], []
     meta = {"seed": args.seed, "paired_trials_per_clutter": args.trials,
             "obstacle_count_range": [3, 6], "clutter": {}}
     scenario_rng = random.Random(args.seed)
+    total_trials = args.trials * len(CLUTTER)
+    completed_trials = 0
+    print("=" * 112)
+    print(" LEVEL 2 GUI EVALUATION: A* + DWB vs. RRT + DWB")
+    print("=" * 112)
+    print(f"[CONFIG] Paired trials: {total_trials} ({args.trials} per clutter level), "
+          f"Max time: {args.max_time}s, Seed: {args.seed}")
+    print("[CONFIG] Obstacles: moderate=3-4, dense=5-6; randomized positions, sizes, and yaw")
+    print(f"[CONFIG] Robot cruise speed: {CRUISE:.2f} m/s (A* and RRT)")
+    print("-" * 112)
+    print(f"{'#':<4} {'Clutter':<10} {'Start':<16} {'Goal':<16} {'Obs':<5} | "
+          f"{'A* Time':<9} {'A* Len':<8} {'A* Lat':<9} | "
+          f"{'RRT Time':<9} {'RRT Len':<8} {'RRT Lat':<9}")
+    print("-" * 112)
     for clutter in CLUTTER:
         paired = []
         for i in range(args.trials):
@@ -318,7 +388,7 @@ def main():
             latency_r = (time.perf_counter() - t0) * 1000
             edges_r = list(r.last_explored_edges)
             if visualizer:
-                visualizer.publish_scenario(i + 1, clutter, sc, path_a, path_r, edges_a, edges_r)
+                visualizer.publish_scenario(completed_trials + 1, clutter, sc, path_a, path_r, edges_a, edges_r)
             if gazebo_mover:
                 gazebo_mover.set_model_pose("start_marker", *sc["start"], 0.005,
                                             world_name="level2_world")
@@ -338,12 +408,14 @@ def main():
                 gazebo_mover.set_model_pose("autonomous_vehicle", *sc["start"], 0.0, yaw,
                                             world_name="level2_world")
             ra = execute("AStar", a, d, sc, None, args.max_time,
-                         path_a, latency_a, visualizer, gazebo_mover)
+                         path_a, latency_a, visualizer, gazebo_mover,
+                         level=2, trial_index=completed_trials + 1)
             if gazebo_mover:
                 gazebo_mover.set_model_pose("autonomous_vehicle", *sc["start"], 0.0, yaw,
                                             world_name="level2_world")
             rr = execute("RRT", r, d, sc, rrt_seed, args.max_time,
-                         path_r, latency_r, visualizer, gazebo_mover)
+                         path_r, latency_r, visualizer, gazebo_mover,
+                         level=2, trial_index=completed_trials + 1)
             pair = {"clutter": clutter, "trial": i + 1, "seed": args.seed,
                     "obstacle_count": len(sc["obstacles"]),
                     "start": sc["start"], "goal": sc["goal"], "obstacles": sc["obstacles"]}
@@ -351,46 +423,67 @@ def main():
                 pair.update({f"{prefix}_{k}": v for k, v in result.items()})
             paired.append(pair)
             rows.append(pair)
-            print(f"{clutter:8s} {i+1:02d}/{args.trials}: A*={'ok' if ra['success'] else ra['failure_reason']} "
-                  f"RRT={'ok' if rr['success'] else rr['failure_reason']}")
-            print(f"[SENSITIVITY] {clutter} layout {i + 1}: evaluating RRT settings and A* resolutions")
-            _, sensitivity_rrt, _ = build(grid)
-            for step in (0.25, 0.4, 0.6):
-                for bias in (0.05, 0.10, 0.20):
-                    for budget in (1500, 3000, 6000):
-                        t0 = time.perf_counter()
-                        path = sensitivity_rrt.plan(sc["start"], sc["goal"], max_iter=budget,
-                                       step_size=step, goal_bias=bias, seed=args.seed + i)
-                        sensitivity.append({"clutter": clutter, "trial": i + 1, "planner": "RRT",
-                                            "step_size": step, "goal_bias": bias, "iterations": budget,
-                                            "planning_latency_ms": (time.perf_counter()-t0)*1000,
-                                            "success": bool(path)})
-            for resolution in (0.05, 0.10, 0.20):
-                if resolution == RES:
-                    g = grid
-                else:
-                    temp = out / "_level2_sensitivity.pgm"
-                    generate_level2_map_pgm(temp, sc["obstacles"], resolution)
-                    g = load_grid(temp)
-                ap2, _, _ = build(g, resolution, PLAN_RADIUS)
-                p = ap2.plan(sc["start"], sc["goal"])
-                sensitivity.append({"clutter": clutter, "trial": i + 1, "planner": "AStar",
-                                    "grid_resolution_m": resolution, "success": bool(p),
-                                    "path_length_m": float(np.linalg.norm(np.diff(p, axis=0), axis=1).sum()) if p else None})
+            evaluation_cases.append((clutter, i + 1, sc))
+            completed_trials += 1
+            start_text = f"({sc['start'][0]:.1f},{sc['start'][1]:.1f})"
+            goal_text = f"({sc['goal'][0]:.1f},{sc['goal'][1]:.1f})"
+            astar_status = f"{ra['completion_time_s']:.1f}s" if ra["success"] else "FAIL"
+            rrt_status = f"{rr['completion_time_s']:.1f}s" if rr["success"] else "FAIL"
+            print(f"{completed_trials:<4} {clutter:<10} {start_text:<16} {goal_text:<16} "
+                  f"{len(sc['obstacles']):<5} | {astar_status:<9} {ra['path_length_m']:<8.2f} "
+                  f"{ra['planning_latency_ms']:<9.1f} | {rrt_status:<9} "
+                  f"{rr['path_length_m']:<8.2f} {rr['planning_latency_ms']:<9.1f}")
+            wait_for_next_trial(completed_trials, total_trials)
         meta["clutter"][clutter] = {"trials": len(paired),
             "astar_success_rate": float(np.mean([x["astar_success"] for x in paired])) if paired else 0,
             "rrt_success_rate": float(np.mean([x["rrt_success"] for x in paired])) if paired else 0,
             "paired_trials": paired}
-        # Ten seeds on up to ten fixed layouts per clutter level.
-        for layout in paired[:10]:
-            sc = {"start": layout["start"], "goal": layout["goal"], "obstacles": layout["obstacles"]}
+    print("[STUDIES] Main paired trials complete; running sensitivity and repeated-seed studies.")
+    for clutter, trial_number, sc in evaluation_cases:
+        eval_map = out / "_level2_eval_map.pgm"
+        generate_level2_map_pgm(eval_map, sc["obstacles"])
+        grid = load_grid(eval_map)
+        print(f"[SENSITIVITY] {clutter} layout {trial_number}: RRT settings and A* resolutions")
+        _, sensitivity_rrt, _ = build(grid)
+        for step in (0.25, 0.4, 0.6):
+            for bias in (0.05, 0.10, 0.20):
+                for budget in (1500, 3000, 6000):
+                    started = time.perf_counter()
+                    path = sensitivity_rrt.plan(
+                        sc["start"], sc["goal"], max_iter=budget, step_size=step,
+                        goal_bias=bias, seed=args.seed + trial_number)
+                    sensitivity.append({"clutter": clutter, "trial": trial_number,
+                                        "planner": "RRT", "step_size": step,
+                                        "goal_bias": bias, "iterations": budget,
+                                        "planning_latency_ms": (time.perf_counter() - started) * 1000,
+                                        "success": bool(path)})
+        for resolution in (0.05, 0.10, 0.20):
+            if resolution == RES:
+                resolution_grid = grid
+            else:
+                temp = out / "_level2_sensitivity.pgm"
+                generate_level2_map_pgm(temp, sc["obstacles"], resolution)
+                resolution_grid = load_grid(temp)
+            astar_resolution, _, _ = build(resolution_grid, resolution, PLAN_RADIUS)
+            path = astar_resolution.plan(sc["start"], sc["goal"])
+            sensitivity.append({"clutter": clutter, "trial": trial_number,
+                                "planner": "AStar", "grid_resolution_m": resolution,
+                                "success": bool(path),
+                                "path_length_m": float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum()) if path else None})
+
+    for clutter in CLUTTER:
+        layouts = [row for row in rows if row["clutter"] == clutter][:10]
+        for layout in layouts:
+            sc = {"start": layout["start"], "goal": layout["goal"],
+                  "obstacles": layout["obstacles"]}
             eval_map = out / "_level2_eval_map.pgm"
             generate_level2_map_pgm(eval_map, sc["obstacles"])
-            _, rp, dc = build(load_grid(eval_map))
+            _, rrt_repeat, repeat_controller = build(load_grid(eval_map))
+            print(f"[REPEATED SEEDS] {clutter} layout {layout['trial']}: 10 RRT seeds")
             for repeat_seed in range(10):
-                if repeat_seed == 0:
-                    print(f"[REPEATED SEEDS] {clutter} layout {layout['trial']}: 10 RRT seeds")
-                result = execute("RRT", rp, dc, sc, args.seed + repeat_seed, args.max_time)
+                result = execute("RRT", rrt_repeat, repeat_controller, sc,
+                                 args.seed + repeat_seed, args.max_time,
+                                 report_status=False)
                 repeats.append({"clutter": clutter, "layout_trial": layout["trial"],
                                 "repeat_seed": args.seed + repeat_seed, **result})
     write_rows(out / "level2_results.csv", rows)
@@ -416,9 +509,17 @@ def main():
             },
         }
     meta["rrt_repeated_seed_variability"] = variability
+    print("=" * 112)
+    print(" LEVEL 2 SUMMARY & STATISTICAL ANALYSIS")
+    print("=" * 112)
+    for clutter, values in meta["statistical_summary"].items():
+        print(f"{clutter.capitalize()} success rate: "
+              f"A*+DWB = {100.0 * values['astar_success_rate']:.1f}%, "
+              f"RRT+DWB = {100.0 * values['rrt_success_rate']:.1f}% | "
+              f"McNemar p = {values['mcnemar_exact_p'] if values['mcnemar_exact_p'] is not None else 'N/A'}")
     with open(out / "level2_results.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
-    print(f"Wrote results to {out.resolve()}")
+    print(f"[OUTPUT] Trial metrics and studies: {out.resolve()}")
     if visualizer:
         visualizer.node.destroy_node()
         import rclpy

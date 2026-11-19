@@ -18,19 +18,24 @@ class Level1Visualizer(Node):
 
     CANVAS_SIZE = 820
     MARGIN = 42
+    LEVEL = 2
+    TOPIC_PREFIX = "/level2/visualization"
 
     def __init__(self):
-        super().__init__("level2_topdown_visualizer")
+        super().__init__(f"level{self.LEVEL}_topdown_visualizer")
         scenario_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.create_subscription(
-            String, "/level2/visualization/scenario", self._scenario_callback, scenario_qos
+            String, f"{self.TOPIC_PREFIX}/scenario", self._scenario_callback, scenario_qos
         )
         self.create_subscription(
-            PoseStamped, "/level2/visualization/robot_pose", self._pose_callback, 20
+            PoseStamped, f"{self.TOPIC_PREFIX}/robot_pose", self._pose_callback, 20
+        )
+        self.create_subscription(
+            String, f"{self.TOPIC_PREFIX}/pedestrians", self._pedestrians_callback, 20
         )
         # Subscribe to odometry as a fallback for deployments that publish a
         # global /odom pose rather than the Level 2 visualization pose.
@@ -40,9 +45,10 @@ class Level1Visualizer(Node):
         self.robot_pose = None
         self.have_visualization_pose = False
         self.trail = []
+        self.pedestrians = []
 
         self.root = tk.Tk()
-        self.root.title("Level 2 Planner Map: A* and RRT")
+        self.root.title(f"Level {self.LEVEL} Planner Map: A* and RRT")
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.canvas = tk.Canvas(
             self.root, width=self.CANVAS_SIZE, height=self.CANVAS_SIZE,
@@ -81,6 +87,19 @@ class Level1Visualizer(Node):
         self.have_visualization_pose = True
         self._update_robot(message.pose.position.x, message.pose.position.y, yaw)
 
+    def _pedestrians_callback(self, message):
+        try:
+            self.pedestrians = json.loads(message.data)
+        except json.JSONDecodeError:
+            return
+        self.canvas.delete("dynamic")
+        for pedestrian in self.pedestrians:
+            x, y = self._world_to_canvas(pedestrian["x"], pedestrian["y"])
+            radius = 10
+            self.canvas.create_oval(x - radius, y - radius, x + radius, y + radius,
+                                    fill="#f09a32", outline="#7a3e00", width=2,
+                                    tags="dynamic")
+
     def _odom_callback(self, message):
         if self.have_visualization_pose:
             return
@@ -102,7 +121,7 @@ class Level1Visualizer(Node):
         self.canvas.delete("all")
         self.canvas.create_text(
             self.CANVAS_SIZE / 2, self.CANVAS_SIZE / 2,
-            text="Waiting for Level 2 trial data…", fill="#202020",
+            text=f"Waiting for Level {self.LEVEL} trial data...", fill="#202020",
             font=("TkDefaultFont", 15),
         )
 
@@ -142,7 +161,7 @@ class Level1Visualizer(Node):
 
         self.canvas.create_text(
             self.CANVAS_SIZE / 2, 18,
-            text=f"Level 2 — Trial {self.scenario['trial']} — top-down planner map",
+            text=f"Level {self.LEVEL} - Trial {self.scenario['trial']} - top-down planner map",
             fill="#202020", font=("TkDefaultFont", 13, "bold"),
         )
         self._draw_legend()
@@ -169,6 +188,7 @@ class Level1Visualizer(Node):
             ("#e04444", "Goal"), ("#b5b5b5", "Explored branches"),
             ("#1769e0", "A* final path"), ("#d12f2f", "RRT final path"),
             ("#7b3fc6", "Live robot / trail"),
+            ("#f09a32", "Moving pedestrian"),
         ]
         x, y = 52, 45
         self.canvas.create_rectangle(42, 30, 226, 184, fill="white", outline="#202020")
