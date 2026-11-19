@@ -169,9 +169,25 @@ class RRTPlanner:
                     if self._is_collision_free(new_x, new_y, goal_node.x, goal_node.y):
                         goal_node.parent = new_node
                         goal_node.cost = new_node.cost + dist_to_goal
-                        return self._extract_path(goal_node)
+                        return self._shortcut_path(self._extract_path(goal_node))
 
         return None  # Path not found within max_iter
+
+
+    def _shortcut_path(self, path):
+        """Greedily remove unnecessary RRT bends while preserving collision safety."""
+        if len(path) < 3:
+            return path
+        result = [path[0]]
+        current = 0
+        while current < len(path) - 1:
+            furthest = len(path) - 1
+            while furthest > current + 1 and not self._is_collision_free(
+                    *path[current], *path[furthest]):
+                furthest -= 1
+            result.append(path[furthest])
+            current = furthest
+        return result
 
     def _extract_path(self, node):
         """Starting from goal node, traces parents back to start and reverses."""

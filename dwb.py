@@ -36,6 +36,7 @@ class DWBLocalPlanner:
         w_align=14.0,
         w_speed=4.0,
         w_risk=0.0,
+        cruise_speed_mps=None,
     ):
         self.grid = np.array(grid)
         self.map_h, self.map_w = self.grid.shape
@@ -68,6 +69,12 @@ class DWBLocalPlanner:
         self.w_align = float(w_align)
         self.w_speed = float(w_speed)
         self.w_risk = float(w_risk)  # Level 3 prediction critic weight (0.0 = plain DWB)
+        self.cruise_speed_mps = (
+            None if cruise_speed_mps is None else float(cruise_speed_mps)
+        )
+        if self.cruise_speed_mps is not None and not (
+                self.min_vel_x <= self.cruise_speed_mps <= self.max_vel_x):
+            raise ValueError("cruise_speed_mps must be within the linear velocity limits")
 
         # Inflation mask for footprint collision checks
         self.inflation_px = int(math.ceil(self.robot_radius / self.res))
@@ -145,9 +152,16 @@ class DWBLocalPlanner:
         target_heading = math.atan2(target_pt[1] - y, target_pt[0] - x)
         heading_err = abs(math.atan2(math.sin(target_heading - th), math.cos(target_heading - th)))
 
-        # Heading governor: scale max forward speed if robot is pointed away from path
-        effective_v_max = v_max * max(0.1, math.cos(min(heading_err, math.pi / 2)))
-        v_cand = np.linspace(v_min, effective_v_max, self.vx_samples)
+        # Use one shared cruise speed for a fair A* / RRT comparison. The
+        # robot turns in place until it is aligned enough to drive safely.
+        if self.cruise_speed_mps is not None:
+            v_cand = np.array([
+                self.cruise_speed_mps if heading_err <= 0.35 else 0.0
+            ])
+        else:
+            # Heading governor: scale max forward speed if pointed away from path.
+            effective_v_max = v_max * max(0.1, math.cos(min(heading_err, math.pi / 2)))
+            v_cand = np.linspace(v_min, effective_v_max, self.vx_samples)
         w_cand = np.linspace(w_min, w_max, self.vtheta_samples)
         V_grid, W_grid = np.meshgrid(v_cand, w_cand)
         V = V_grid.flatten()

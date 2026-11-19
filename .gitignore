@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# ROS 2
+build/
+install/
+log/
+
+# IDE
+.vscode/
+.idea/
+.claude/
+
+claude.md
+README.md
