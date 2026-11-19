@@ -22,13 +22,14 @@ install(
 )
 
 install(
-  FILES level1_world.sdf level1_map.yaml level1_map.pgm
+  FILES level1_world.sdf level1_map.yaml level1_map.pgm level1_visualizer.py
+        level2_world.sdf level2_map.yaml level2_map.pgm level2_visualizer.py
   DESTINATION share/${PROJECT_NAME}
 )
 
 # Install executable python scripts
 install(
-  PROGRAMS run_level1.py astar.py rrt.py dwb.py
+  PROGRAMS run_level1.py run_level2.py astar.py rrt.py dwb.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

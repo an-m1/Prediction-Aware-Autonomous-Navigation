@@ -30,6 +30,7 @@ class RRTPlanner:
         self.inflation_px = int(math.ceil(self.robot_radius / self.res))
         # Pre-calculates an obstacle mask ahead of time so planner doesn't recalculate safety boundaries every iteration
         self.blocked = self._compute_inflated_grid()
+        self.last_explored_edges = []
 
     def _world_to_grid(self, x_m, y_m):
         gx = int((x_m - self.origin_x) / self.res)
@@ -105,6 +106,7 @@ class RRTPlanner:
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
+        self.last_explored_edges = []
 
         start_x, start_y = float(start_xy[0]), float(start_xy[1])
         goal_x, goal_y = float(goal_xy[0]), float(goal_xy[1])
@@ -162,6 +164,9 @@ class RRTPlanner:
                 node_list.append(new_node)
                 node_x.append(new_x)
                 node_y.append(new_y)
+                self.last_explored_edges.append(
+                    ((nearest_node.x, nearest_node.y), (new_x, new_y))
+                )
 
                 # 5. Goal check: can we reach goal directly from new node?
                 dist_to_goal = math.hypot(new_x - goal_node.x, new_y - goal_node.y)

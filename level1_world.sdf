@@ -49,25 +49,50 @@
       </link>
     </model>
 
-    <!-- Fixed-size central obstacle. Its position and yaw vary by trial. -->
-    <model name="central_obstacle">
+    <!-- Five fixed collision-size variants; the evaluator activates one per seeded trial. -->
+    <model name="central_obstacle_1">
       <static>true</static>
       <pose>0 0 0.5 0 0 0</pose>
       <link name="link">
-        <collision name="collision">
-          <geometry>
-            <box><size>2.0 2.0 1.0</size></box>
-          </geometry>
-        </collision>
-        <visual name="visual">
-          <geometry>
-            <box><size>2.0 2.0 1.0</size></box>
-          </geometry>
-          <material>
-            <ambient>0.3 0.3 0.3 1</ambient>
-            <diffuse>0.5 0.5 0.5 1</diffuse>
-          </material>
-        </visual>
+        <collision name="collision"><geometry><box><size>1.5 2.0 1.0</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1.5 2.0 1.0</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.5 0.5 0.5 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="central_obstacle_2">
+      <static>true</static>
+      <pose>32 30 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>1.75 2.25 1.0</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>1.75 2.25 1.0</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.5 0.5 0.5 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="central_obstacle_3">
+      <static>true</static>
+      <pose>33 30 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>2.0 2.0 1.0</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>2.0 2.0 1.0</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.5 0.5 0.5 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="central_obstacle_4">
+      <static>true</static>
+      <pose>34 30 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>2.25 1.75 1.0</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>2.25 1.75 1.0</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.5 0.5 0.5 1</diffuse></material></visual>
+      </link>
+    </model>
+    <model name="central_obstacle_5">
+      <static>true</static>
+      <pose>35 30 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>2.5 2.5 1.0</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>2.5 2.5 1.0</size></box></geometry>
+          <material><ambient>0.3 0.3 0.3 1</ambient><diffuse>0.5 0.5 0.5 1</diffuse></material></visual>
       </link>
     </model>
 

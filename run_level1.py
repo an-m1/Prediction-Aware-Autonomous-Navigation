@@ -8,7 +8,7 @@ Pipeline:
 - Local Controller: Nav2 DWB (Dynamic Window Approach)
 - Success Definition: Robot reaches within 0.25 m of goal within 120 s without colliding.
 - 30 Paired Trials: Start/goal pairs crossing the central obstacle in a 12m x 12m arena.
-  * Fixed 2m x 2m obstacle with per-trial center jitter and rotation.
+  * One of five 1.5m–2.5m obstacle sizes with per-trial center jitter and rotation.
 
   * Start/goal positions varied so the straight line between them always crosses the obstacle.
 - Markers: flat green cylinder = start pad, flat red cylinder = goal pad.
@@ -167,18 +167,22 @@ def load_pgm(pgm_path="level1_map.pgm"):
 
 ARENA_HALF = 6.0  # metres; arena is 12m x 12m
 ROBOT_CRUISE_SPEED_MPS = 0.4  # Shared moving speed for both A* and RRT runs.
+LEVEL1_OBSTACLE_SIZES = (
+    (1.5, 2.0), (1.75, 2.25), (2.0, 2.0), (2.25, 1.75), (2.5, 2.5),
+)
 
 
 def sample_obstacle(rng: random.Random):
     """
-    Returns (cx, cy, width, height) for the trial obstacle.
-    - Centre jittered ±0.5m from (0, 0).
-    - Width and height sampled in [1.5, 2.5] m independently.
+    Returns pose, dimensions, and matching Gazebo model ID for the obstacle.
+    The seeded generator selects one of the size variants installed in the SDF.
     """
     cx = rng.uniform(-0.5, 0.5)
     cy = rng.uniform(-0.5, 0.5)
     yaw = rng.uniform(-math.pi / 4.0, math.pi / 4.0)
-    return cx, cy, 2.0, 2.0, yaw
+    model_id = rng.randrange(len(LEVEL1_OBSTACLE_SIZES)) + 1
+    width, height = LEVEL1_OBSTACLE_SIZES[model_id - 1]
+    return cx, cy, width, height, yaw, model_id
 
 
 def line_intersects_box(x1, y1, x2, y2, bx_min, bx_max, by_min, by_max):
@@ -216,7 +220,7 @@ def generate_level1_scenarios(num_trials=30, seed=12345):
 
     while len(trials) < num_trials and attempts < 20000:
         attempts += 1
-        obs_cx, obs_cy, obs_w, obs_h, obs_yaw = sample_obstacle(rng)
+        obs_cx, obs_cy, obs_w, obs_h, obs_yaw, obs_model_id = sample_obstacle(rng)
         extent = math.hypot(obs_w / 2.0, obs_h / 2.0)
         bx_min, bx_max = obs_cx - extent, obs_cx + extent
         by_min, by_max = obs_cy - extent, obs_cy + extent
@@ -264,6 +268,7 @@ def generate_level1_scenarios(num_trials=30, seed=12345):
             "obs_w":  round(obs_w, 3),
             "obs_h":  round(obs_h, 3),
             "obs_yaw": round(obs_yaw, 4),
+            "obs_model_id": obs_model_id,
         })
 
     if len(trials) < num_trials:
@@ -568,6 +573,85 @@ def bootstrap_diff_ci(diffs, n_boot=2000, alpha=0.05):
     return low, high
 
 
+def generate_trial_grid_svg(trials, results_a, results_rrt,
+                            filename="level1_trial_grid.svg", columns=6):
+    """Save a compact top-down summary of every completed Level 1 trial."""
+    cell_size = 210
+    header_height = 60
+    rows = max(1, int(math.ceil(len(trials) / float(columns))))
+    width = columns * cell_size
+    height = header_height + rows * cell_size
+    plot_margin = 25
+    plot_size = cell_size - 2 * plot_margin
+
+    def screen_point(x, y, cell_x, cell_y):
+        px = cell_x + plot_margin + (x + ARENA_HALF) * plot_size / (2 * ARENA_HALF)
+        py = cell_y + plot_margin + (ARENA_HALF - y) * plot_size / (2 * ARENA_HALF)
+        return px, py
+
+    def point_list(points, cell_x, cell_y):
+        return " ".join(
+            f"{x:.1f},{y:.1f}" for x, y in
+            (screen_point(px, py, cell_x, cell_y) for px, py in points)
+        )
+
+    svg = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="white"/>',
+        '<style>text{font-family:Arial,sans-serif;fill:#202020}.title{font-size:15px;font-weight:bold}.label{font-size:11px}.small{font-size:9px}</style>',
+        '<text x="18" y="24" class="title">Level 1 trial paths</text>',
+        '<line x1="205" y1="19" x2="225" y2="19" stroke="#1769e0" stroke-width="3"/><text x="230" y="23" class="small">A* actual</text>',
+        '<line x1="315" y1="19" x2="335" y2="19" stroke="#d12f2f" stroke-width="3"/><text x="340" y="23" class="small">RRT actual</text>',
+        '<circle cx="445" cy="19" r="4" fill="#20a34a"/><text x="453" y="23" class="small">start</text>',
+        '<circle cx="505" cy="19" r="4" fill="#e04444"/><text x="513" y="23" class="small">goal</text>',
+        '<rect x="570" y="14" width="10" height="10" fill="#222"/><text x="586" y="23" class="small">obstacle</text>',
+        '<text x="18" y="45" class="small">Dashed lines: global plan. Solid lines: recorded DWB robot trajectory.</text>',
+    ]
+
+    for index, (trial, res_a, res_r) in enumerate(zip(trials, results_a, results_rrt)):
+        col = index % columns
+        row = index // columns
+        cell_x = col * cell_size
+        cell_y = header_height + row * cell_size
+        state_a = "OK" if res_a["success"] else "X"
+        state_r = "OK" if res_r["success"] else "X"
+        svg.append(f'<rect x="{cell_x + 5}" y="{cell_y + 5}" width="{cell_size - 10}" height="{cell_size - 10}" fill="none" stroke="#333"/>')
+        svg.append(f'<text x="{cell_x + cell_size / 2:.1f}" y="{cell_y + 18}" class="label" text-anchor="middle">T{index + 1:02d} — A* {state_a}, RRT {state_r}</text>')
+
+        left, top = screen_point(-ARENA_HALF, ARENA_HALF, cell_x, cell_y)
+        right, bottom = screen_point(ARENA_HALF, -ARENA_HALF, cell_x, cell_y)
+        svg.append(f'<rect x="{left:.1f}" y="{top:.1f}" width="{right - left:.1f}" height="{bottom - top:.1f}" fill="none" stroke="#777" stroke-width="1"/>')
+
+        cx, cy = trial["obs_cx"], trial["obs_cy"]
+        ow, oh, yaw = trial["obs_w"], trial["obs_h"], trial["obs_yaw"]
+        corners = []
+        for lx, ly in ((-ow / 2, -oh / 2), (ow / 2, -oh / 2),
+                       (ow / 2, oh / 2), (-ow / 2, oh / 2)):
+            corners.append((cx + math.cos(yaw) * lx - math.sin(yaw) * ly,
+                            cy + math.sin(yaw) * lx + math.cos(yaw) * ly))
+        svg.append(f'<polygon points="{point_list(corners, cell_x, cell_y)}" fill="#222"/>')
+
+        for planned, color in ((res_a["planned_path"], "#1769e0"),
+                               (res_r["planned_path"], "#d12f2f")):
+            if len(planned) >= 2:
+                svg.append(f'<polyline points="{point_list(planned, cell_x, cell_y)}" fill="none" stroke="{color}" stroke-width="1" stroke-dasharray="3 2" opacity="0.55"/>')
+        for trajectory, color in ((res_a["trajectory"], "#1769e0"),
+                                  (res_r["trajectory"], "#d12f2f")):
+            if len(trajectory) >= 2:
+                svg.append(f'<polyline points="{point_list(trajectory, cell_x, cell_y)}" fill="none" stroke="{color}" stroke-width="2"/>')
+
+        sx, sy = screen_point(*trial["start"], cell_x, cell_y)
+        gx, gy = screen_point(*trial["goal"], cell_x, cell_y)
+        svg.append(f'<circle cx="{sx:.1f}" cy="{sy:.1f}" r="3.5" fill="#20a34a"/>')
+        svg.append(f'<circle cx="{gx:.1f}" cy="{gy:.1f}" r="3.5" fill="#e04444"/>')
+
+    svg.append('</svg>')
+    with open(filename, "w", encoding="utf-8") as output:
+        output.write("\n".join(svg))
+    return filename
+
+
 # ---------------------------------------------------------------------------
 # ROS 2 / Gazebo executor
 # ---------------------------------------------------------------------------
@@ -583,13 +667,26 @@ class Ros2NavigationExecutor:
     def __init__(self):
         import rclpy
         from rclpy.node import Node
-        from geometry_msgs.msg import Twist
+        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+        from geometry_msgs.msg import PoseStamped, Twist
         from nav_msgs.msg import Odometry
+        from std_msgs.msg import String
 
         self.node    = Node("level1_navigation_node")
         self.cmd_pub = self.node.create_publisher(Twist, "/cmd_vel", 10)
         self.odom_sub = self.node.create_subscription(
             Odometry, "/odom", self._odom_cb, 10
+        )
+        self.robot_pose_pub = self.node.create_publisher(
+            PoseStamped, "/level1/visualization/robot_pose", 10
+        )
+        scenario_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.scenario_pub = self.node.create_publisher(
+            String, "/level1/visualization/scenario", scenario_qos
         )
         # Diff-drive odometry is local to the robot's spawn/reset frame.  Keep
         # that local pose separate from the world pose used by the planners.
@@ -669,6 +766,52 @@ class Ros2NavigationExecutor:
         self.controlled_world_pose = (x, y, yaw)
         self.last_world_pose = self.controlled_world_pose
         self.current_vel = (linear_velocity, angular_velocity)
+        self.publish_visualization_pose(x, y, yaw)
+
+    def publish_visualization_pose(self, x: float, y: float, yaw: float):
+        """Publish the world-frame pose rendered in Gazebo for the map node."""
+        from geometry_msgs.msg import PoseStamped
+        msg = PoseStamped()
+        msg.header.frame_id = "world"
+        msg.header.stamp = self.node.get_clock().now().to_msg()
+        msg.pose.position.x = float(x)
+        msg.pose.position.y = float(y)
+        msg.pose.orientation.z = math.sin(yaw / 2.0)
+        msg.pose.orientation.w = math.cos(yaw / 2.0)
+        self.robot_pose_pub.publish(msg)
+
+    def publish_visualization_scenario(self, trial_index, trial, astar_path,
+                                       rrt_path, astar_edges, rrt_edges):
+        """Publish one self-contained trial snapshot for the top-down map."""
+        from std_msgs.msg import String
+
+        def path_points(path):
+            return [[round(float(x), 4), round(float(y), 4)] for x, y in (path or [])]
+
+        def edge_points(edges):
+            return [
+                [[round(float(ax), 4), round(float(ay), 4)],
+                 [round(float(bx), 4), round(float(by), 4)]]
+                for (ax, ay), (bx, by) in edges
+            ]
+
+        msg = String()
+        msg.data = json.dumps({
+            "trial": trial_index,
+            "arena_half": ARENA_HALF,
+            "start": path_points([trial["start"]])[0],
+            "goal": path_points([trial["goal"]])[0],
+            "obstacle": {
+                "cx": trial["obs_cx"], "cy": trial["obs_cy"],
+                "width": trial["obs_w"], "height": trial["obs_h"],
+                "yaw": trial["obs_yaw"],
+            },
+            "astar_path": path_points(astar_path),
+            "rrt_path": path_points(rrt_path),
+            "astar_edges": edge_points(astar_edges),
+            "rrt_edges": edge_points(rrt_edges),
+        }, separators=(",", ":"))
+        self.scenario_pub.publish(msg)
 
     def set_model_pose(self, model_name: str, x: float, y: float, z: float,
                        yaw: float = 0.0, world_name: str = "level1_world"):
@@ -746,6 +889,7 @@ class Ros2NavigationExecutor:
         self.controlled_world_pose = self.last_world_pose
         self.current_vel = (0.0, 0.0)
         self.stop_robot()
+        self.publish_visualization_pose(sx, sy, yaw)
         time.sleep(0.2)
 
 
@@ -778,7 +922,7 @@ def main():
     print(" LEVEL 1 GUI EVALUATION: A* + DWB vs. RRT + DWB")
     print("=" * 80)
     print(f"[CONFIG] Trials: {args.trials}, Max time: {args.max_time}s, Seed: {args.seed}")
-    print("[CONFIG] Center obstacle: fixed 2.0x2.0m, position jitter +/-0.5m, varying yaw")
+    print("[CONFIG] Center obstacle: seeded size variant (1.5m–2.5m), position jitter +/-0.5m, varying yaw")
     print(f"[CONFIG] Start/Goal markers: flat cylinders (r=0.4m, h=0.01m) in Gazebo")
     print(f"[CONFIG] Robot cruise speed: {ROBOT_CRUISE_SPEED_MPS:.2f} m/s (A* and RRT)")
 
@@ -834,13 +978,31 @@ def main():
             cruise_speed_mps=ROBOT_CRUISE_SPEED_MPS,
         )
 
+        # Compute and publish both global plans before either robot run starts.
+        # The standalone map node receives the final paths and their explored
+        # search/tree branches as one complete pre-trial overlay.
+        viz_astar_path = a_planner.plan(start, goal)
+        viz_astar_edges = list(a_planner.last_explored_edges)
+        viz_rrt_path = r_planner.plan(start, goal, seed=rrt_seed)
+        viz_rrt_edges = list(r_planner.last_explored_edges)
+        if ros_exec is not None:
+            ros_exec.publish_visualization_scenario(
+                i, trial, viz_astar_path, viz_rrt_path,
+                viz_astar_edges, viz_rrt_edges,
+            )
+
         # 3. In ROS 2 mode: reposition Gazebo markers and robot
         if ros_exec is not None:
             # Move start and goal cylinder markers
             ros_exec.set_model_pose("start_marker", start[0], start[1], 0.005)
             ros_exec.set_model_pose("goal_marker",  goal[0],  goal[1],  0.005)
-            # Move and rotate the fixed-size obstacle to this trial's pose.
-            ros_exec.set_model_pose("central_obstacle", obs_cx, obs_cy, 0.5, trial["obs_yaw"])
+            # Activate the matching collision geometry and park the other size variants.
+            for model_id in range(1, len(LEVEL1_OBSTACLE_SIZES) + 1):
+                model_name = f"central_obstacle_{model_id}"
+                if model_id == trial["obs_model_id"]:
+                    ros_exec.set_model_pose(model_name, obs_cx, obs_cy, 0.5, trial["obs_yaw"])
+                else:
+                    ros_exec.set_model_pose(model_name, 30.0 + model_id, 30.0, 0.5)
 
         # 4. Run both planners from the exact same physical start pose.
         init_yaw = math.atan2(goal[1] - start[1], goal[0] - start[0])
@@ -972,7 +1134,7 @@ def main():
         writer.writerow([
             "trial",
             "start_x", "start_y", "goal_x", "goal_y",
-            "obs_cx", "obs_cy", "obs_w", "obs_h", "obs_yaw",
+            "obs_cx", "obs_cy", "obs_w", "obs_h", "obs_yaw", "obs_model_id",
             "astar_success", "astar_time_s", "astar_length_m", "astar_jaggedness_rad",
             "astar_smoothness", "astar_latency_ms", "astar_clearance_m", "astar_rmse_m",
             "rrt_success", "rrt_time_s", "rrt_length_m", "rrt_jaggedness_rad",
@@ -984,7 +1146,7 @@ def main():
             writer.writerow([
                 idx + 1,
                 s[0], s[1], g[0], g[1],
-                trial["obs_cx"], trial["obs_cy"], trial["obs_w"], trial["obs_h"], trial["obs_yaw"],
+                trial["obs_cx"], trial["obs_cy"], trial["obs_w"], trial["obs_h"], trial["obs_yaw"], trial["obs_model_id"],
                 ra["success"], ra["completion_time_s"], ra["path_length_m"],
                 ra["path_jaggedness_rad"], ra["control_smoothness"],
                 ra["planning_latency_ms"], ra["min_clearance_m"], ra["tracking_error_rms_m"],
@@ -1000,7 +1162,7 @@ def main():
                 "level":           1,
                 "trials":          len(trials_meta),
                 "arena_size_m":    "12 x 12",
-                "obstacle":        "fixed 2m x 2m box, center jitter ?0.5m, varying yaw",
+                "obstacle":        "seeded size variant from 1.5m to 2.5m, center jitter +/-0.5m, varying yaw",
                 "robot_radius_m":  physical_robot_radius,
                 "goal_tolerance_m": 0.25,
                 "max_time_s":      args.max_time,
@@ -1015,7 +1177,9 @@ def main():
             "trials_meta": trials_meta,
         }, f, indent=2)
 
+    grid_file = generate_trial_grid_svg(trials_meta, results_a, results_rrt)
     print(f"[OUTPUT] Trial metrics: {csv_file}, {json_file}")
+    print(f"[OUTPUT] Trial grid: {grid_file}")
 
 
 if __name__ == "__main__":

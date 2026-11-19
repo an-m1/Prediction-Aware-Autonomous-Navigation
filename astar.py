@@ -21,6 +21,7 @@ class AStarPlanner:
         self.inflation_px = int(math.ceil(self.robot_radius / self.res))
         # Pre-computes the obstacle mask so path planning queries stay fast
         self.blocked = self._compute_inflated_grid()
+        self.last_explored_edges = []
 
     def _world_to_grid(self, x_m, y_m):
         gx = int((x_m - self.origin_x) / self.res)
@@ -71,6 +72,7 @@ class AStarPlanner:
         """
         start_x, start_y = float(start_xy[0]), float(start_xy[1])
         goal_x, goal_y = float(goal_xy[0]), float(goal_xy[1])
+        self.last_explored_edges = []
 
         start_gx, start_gy = self._world_to_grid(start_x, start_y)
         goal_gx, goal_gy = self._world_to_grid(goal_x, goal_y)
@@ -148,6 +150,11 @@ class AStarPlanner:
                 if tentative_g < g_scores.get(neighbor, float('inf')):
                     came_from[neighbor] = current
                     g_scores[neighbor] = tentative_g
+                    if len(self.last_explored_edges) < 4000:
+                        self.last_explored_edges.append((
+                            self._grid_to_world(cgx, cgy),
+                            self._grid_to_world(ngx, ngy),
+                        ))
                     h_score = math.hypot(ngx - goal_gx, ngy - goal_gy) * self.res
                     f_score = tentative_g + h_score
                     counter += 1
