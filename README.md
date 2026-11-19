@@ -44,6 +44,21 @@ The map uses a white background and shows obstacles, start and goal markers,
 explored A* graph edges and RRT tree branches, final A* and RRT paths, and the
 live robot heading with its trajectory trail.
 
+All three levels use the shared `navigation_visualizer.py`. The level-specific
+launch files remain as convenient aliases and pass `--level 1`, `--level 2`, or
+`--level 3` to that shared program. It can also be started directly from the
+source directory after sourcing ROS:
+
+```bash
+python3 src/PAAN/navigation_visualizer.py --level 2
+```
+
+Or use the single generic ROS launch command for any level:
+
+```bash
+ros2 launch vehicle_description navigation_visualizer.launch.py level:=2
+```
+
 When all trials finish, `level1_trial_grid.svg` is saved beside
 `level1_results.csv` and `level1_results.json`. It contains a top-down grid of
 every trial with the obstacle, start/goal markers, planned paths, recorded A*

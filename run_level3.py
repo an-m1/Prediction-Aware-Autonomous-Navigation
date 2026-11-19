@@ -10,7 +10,7 @@ from pathlib import Path
 
 from run_level2 import (
     CRUISE, HALF, build, execute, generate_level2_map_pgm, load_grid,
-    point_clear, wait_for_next_trial, write_rows,
+    point_clear, safe_set_model_pose, wait_for_next_trial, write_rows,
 )
 
 
@@ -159,12 +159,12 @@ def main():
         initial_yaw = math.atan2(scenario["goal"][1] - scenario["start"][1],
                                  scenario["goal"][0] - scenario["start"][0])
         if gazebo_mover:
-            gazebo_mover.set_model_pose("start_marker", *scenario["start"], 0.005,
-                                        world_name="level3_world")
-            gazebo_mover.set_model_pose("goal_marker", *scenario["goal"], 0.005,
-                                        world_name="level3_world")
-            gazebo_mover.set_model_pose("autonomous_vehicle", *scenario["start"], 0.0,
-                                        initial_yaw, world_name="level3_world")
+            safe_set_model_pose(gazebo_mover, "start_marker", *scenario["start"], 0.005,
+                                world_name="level3_world")
+            safe_set_model_pose(gazebo_mover, "goal_marker", *scenario["goal"], 0.005,
+                                world_name="level3_world")
+            safe_set_model_pose(gazebo_mover, "autonomous_vehicle", *scenario["start"],
+                                0.0, initial_yaw, world_name="level3_world")
 
         astar_result = execute(
             "AStar", astar, controller, scenario, None, args.max_time,
@@ -172,8 +172,8 @@ def main():
             level=3, trial_index=trial, dynamic_provider=pedestrian_positions,
         )
         if gazebo_mover:
-            gazebo_mover.set_model_pose("autonomous_vehicle", *scenario["start"], 0.0,
-                                        initial_yaw, world_name="level3_world")
+            safe_set_model_pose(gazebo_mover, "autonomous_vehicle", *scenario["start"],
+                                0.0, initial_yaw, world_name="level3_world")
         rrt_result = execute(
             "RRT", rrt, controller, scenario, rrt_seed, args.max_time,
             rrt_path, rrt_latency, visualizer, gazebo_mover,

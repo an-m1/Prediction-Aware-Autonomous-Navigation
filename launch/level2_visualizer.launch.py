@@ -7,8 +7,8 @@ from launch.actions import ExecuteProcess
 
 def generate_launch_description():
     visualizer_path = os.path.join(
-        get_package_share_directory("vehicle_description"), "level2_visualizer.py"
+        get_package_share_directory("vehicle_description"), "navigation_visualizer.py"
     )
     return LaunchDescription([
-        ExecuteProcess(cmd=["python3", visualizer_path], output="screen"),
+        ExecuteProcess(cmd=["python3", visualizer_path, "--level", "2"], output="screen"),
     ])

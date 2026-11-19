@@ -26,7 +26,7 @@ RES = 0.05
 ORIGIN = -6.0
 RADIUS = 0.18
 PLAN_RADIUS = 0.28
-CRUISE = 0.4
+CRUISE = 0.6
 CLUTTER = {"moderate": (3, 4), "dense": (5, 6)}
 # These box dimensions match obstacle_1..obstacle_10 in level2_world.sdf.
 GAZEBO_OBSTACLE_SIZES = ((1.4, 1.0), (0.9, 1.5), (1.6, 0.9),
@@ -145,6 +145,27 @@ def clearance(x, y, obstacles):
     return d - RADIUS
 
 
+def safe_set_model_pose(gazebo_mover, model_name, x, y, z, yaw=0.0,
+                        world_name="level2_world"):
+    """Retry transient Gazebo timeouts without aborting an evaluation run."""
+    if gazebo_mover is None or getattr(gazebo_mover, "rendering_disabled", False):
+        return False
+    last_error = None
+    for attempt in range(2):
+        try:
+            gazebo_mover.set_model_pose(model_name, x, y, z, yaw, world_name)
+            return True
+        except RuntimeError as exc:
+            last_error = exc
+            if attempt == 0:
+                time.sleep(0.25)
+    gazebo_mover.rendering_disabled = True
+    print(f"[WARN] Gazebo rendering disabled after repeated pose-update failures: {last_error}")
+    print("[WARN] The trial and Python visualizer will continue; restart level*_sim.launch.py "
+          "before the next run to restore Gazebo rendering.")
+    return False
+
+
 def execute(name, planner, controller, sc, seed, max_time=120,
             planned_path=None, planning_latency=None, visualizer=None, gazebo_mover=None,
             level=2, trial_index=None, dynamic_provider=None, report_status=True):
@@ -172,8 +193,8 @@ def execute(name, planner, controller, sc, seed, max_time=120,
     heading = math.atan2(path[1][1] - path[0][1], path[1][0] - path[0][0])
     pose, vel = (*sc["start"], heading), (0.0, 0.0)
     if gazebo_mover:
-        gazebo_mover.set_model_pose("autonomous_vehicle", pose[0], pose[1], 0.0,
-                                    pose[2], world_name="level2_world")
+        safe_set_model_pose(gazebo_mover, "autonomous_vehicle", pose[0], pose[1], 0.0,
+                            pose[2], world_name=f"level{level}_world")
     if visualizer:
         visualizer.publish_pose(*pose)
     if report_status:
@@ -216,8 +237,11 @@ def execute(name, planner, controller, sc, seed, max_time=120,
         if visualizer:
             visualizer.publish_pose(*pose)
         if gazebo_mover:
-            gazebo_mover.set_model_pose("autonomous_vehicle", pose[0], pose[1], 0.0,
-                                        pose[2], world_name="level2_world")
+            safe_set_model_pose(
+                gazebo_mover, "autonomous_vehicle", pose[0], pose[1], 0.0,
+                pose[2], world_name=f"level{level}_world")
+            # Preserve real-time motion in the Python visualizer even if Gazebo
+            # rendering has been disabled after a transport timeout.
             time.sleep(0.1)
     base.update(failure_reason="timeout", min_clearance_m=min_clear)
     if report_status:
@@ -229,7 +253,8 @@ def build(grid, resolution=RES, robot_radius=PLAN_RADIUS):
     return (AStarPlanner(grid, resolution, ORIGIN, ORIGIN, robot_radius),
             RRTPlanner(grid, resolution, ORIGIN, ORIGIN, robot_radius),
             DWBLocalPlanner(grid, resolution, ORIGIN, ORIGIN, robot_radius=0.20,
-                            goal_tolerance=0.25, cruise_speed_mps=CRUISE))
+                            max_vel_x=max(0.5, CRUISE), goal_tolerance=0.25,
+                            cruise_speed_mps=CRUISE))
 
 
 def write_rows(path, rows):
@@ -390,29 +415,31 @@ def main():
             if visualizer:
                 visualizer.publish_scenario(completed_trials + 1, clutter, sc, path_a, path_r, edges_a, edges_r)
             if gazebo_mover:
-                gazebo_mover.set_model_pose("start_marker", *sc["start"], 0.005,
-                                            world_name="level2_world")
-                gazebo_mover.set_model_pose("goal_marker", *sc["goal"], 0.005,
-                                            world_name="level2_world")
+                safe_set_model_pose(gazebo_mover, "start_marker", *sc["start"], 0.005,
+                                    world_name="level2_world")
+                safe_set_model_pose(gazebo_mover, "goal_marker", *sc["goal"], 0.005,
+                                    world_name="level2_world")
                 active_ids = {ob["model_id"] for ob in sc["obstacles"]}
                 for obstacle in sc["obstacles"]:
-                    gazebo_mover.set_model_pose(
+                    safe_set_model_pose(
+                        gazebo_mover,
                         f"obstacle_{obstacle['model_id']}", obstacle["x"], obstacle["y"],
                         0.5, obstacle["yaw"], world_name="level2_world")
                 for model_id in range(1, len(GAZEBO_OBSTACLE_SIZES) + 1):
                     if model_id not in active_ids:
-                        gazebo_mover.set_model_pose(f"obstacle_{model_id}", 30.0 + model_id, 30.0,
-                                                    0.5, world_name="level2_world")
+                        safe_set_model_pose(gazebo_mover, f"obstacle_{model_id}",
+                                            30.0 + model_id, 30.0, 0.5,
+                                            world_name="level2_world")
                 yaw = math.atan2(sc["goal"][1] - sc["start"][1],
                                  sc["goal"][0] - sc["start"][0])
-                gazebo_mover.set_model_pose("autonomous_vehicle", *sc["start"], 0.0, yaw,
-                                            world_name="level2_world")
+                safe_set_model_pose(gazebo_mover, "autonomous_vehicle", *sc["start"],
+                                    0.0, yaw, world_name="level2_world")
             ra = execute("AStar", a, d, sc, None, args.max_time,
                          path_a, latency_a, visualizer, gazebo_mover,
                          level=2, trial_index=completed_trials + 1)
             if gazebo_mover:
-                gazebo_mover.set_model_pose("autonomous_vehicle", *sc["start"], 0.0, yaw,
-                                            world_name="level2_world")
+                safe_set_model_pose(gazebo_mover, "autonomous_vehicle", *sc["start"],
+                                    0.0, yaw, world_name="level2_world")
             rr = execute("RRT", r, d, sc, rrt_seed, args.max_time,
                          path_r, latency_r, visualizer, gazebo_mover,
                          level=2, trial_index=completed_trials + 1)

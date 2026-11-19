@@ -166,7 +166,7 @@ def load_pgm(pgm_path="level1_map.pgm"):
 # ---------------------------------------------------------------------------
 
 ARENA_HALF = 6.0  # metres; arena is 12m x 12m
-ROBOT_CRUISE_SPEED_MPS = 0.4  # Shared moving speed for both A* and RRT runs.
+ROBOT_CRUISE_SPEED_MPS = 0.6  # Shared moving speed for both A* and RRT runs.
 LEVEL1_OBSTACLE_SIZES = (
     (1.5, 2.0), (1.75, 2.25), (2.0, 2.0), (2.25, 1.75), (2.5, 2.5),
 )
@@ -693,6 +693,7 @@ class Ros2NavigationExecutor:
         self.odom_pose = None
         self.current_vel  = (0.0, 0.0)
         self.pose_service_available = None
+        self.pose_service_retry_at = 0.0
         self.world_start = None
         self.world_start_yaw = 0.0
         self.odom_origin = None
@@ -819,7 +820,10 @@ class Ros2NavigationExecutor:
         import subprocess
 
         service = f"/world/{world_name}/set_pose"
-        if self.pose_service_available is not False:
+        # If the bridge was still starting on an earlier call, probe it again
+        # periodically instead of using a new `gz service` process forever.
+        if (self.pose_service_available is not False
+                or time.monotonic() >= self.pose_service_retry_at):
             try:
                 from ros_gz_interfaces.srv import SetEntityPose
                 from geometry_msgs.msg import Point, Quaternion
@@ -828,6 +832,7 @@ class Ros2NavigationExecutor:
                 client = self.node.create_client(SetEntityPose, service)
                 if not client.wait_for_service(timeout_sec=1.5):
                     self.pose_service_available = False
+                    self.pose_service_retry_at = time.monotonic() + 2.0
                     raise RuntimeError(f"ROS bridge service unavailable: {service}")
                 req = SetEntityPose.Request()
                 req.entity.name = model_name
@@ -842,9 +847,11 @@ class Ros2NavigationExecutor:
                     self.pose_service_available = True
                     return
                 self.pose_service_available = False
+                self.pose_service_retry_at = time.monotonic() + 2.0
                 raise RuntimeError(f"ROS bridge rejected pose update for {model_name}")
             except Exception as ros_error:
                 self.pose_service_available = False
+                self.pose_service_retry_at = time.monotonic() + 2.0
                 print(f"[WARN] {ros_error}; trying Gazebo Transport set_pose.")
 
         quat_z = math.sin(yaw / 2.0)
@@ -970,6 +977,7 @@ def main():
         controller = DWBLocalPlanner(
             grid, res, origin_x, origin_y,
             robot_radius=local_controller_radius,
+            max_vel_x=max(0.5, ROBOT_CRUISE_SPEED_MPS),
             goal_tolerance=0.25,
             w_path=40.0,
             w_goal=4.0,

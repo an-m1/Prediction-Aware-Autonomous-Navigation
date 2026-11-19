@@ -22,9 +22,9 @@ install(
 )
 
 install(
-  FILES level1_world.sdf level1_map.yaml level1_map.pgm level1_visualizer.py
-        level2_world.sdf level2_map.yaml level2_map.pgm level2_visualizer.py
-        level3_world.sdf level3_visualizer.py pedestrian_motion.py
+  FILES level1_world.sdf level1_map.yaml level1_map.pgm
+        level2_world.sdf level2_map.yaml level2_map.pgm
+        level3_world.sdf navigation_visualizer.py pedestrian_motion.py
   DESTINATION share/${PROJECT_NAME}
 )
 
