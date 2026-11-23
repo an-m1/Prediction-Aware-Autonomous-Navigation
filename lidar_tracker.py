@@ -2,12 +2,14 @@ import math
 import numpy as np
 
 class LidarPedestrianTracker
-    """Filters 2D LiDAR points against the static occupancy map, clusters remaining"
+    """Filters 2D LiDAR points against the static occupancy map, clusters remaining
     foreground points, and tracks pedestrian using nearest-neighbor association
     with a constant-velocity filter."""
 
     def __init__(self, grid, resolution, origin_x, origin_y, cluster_radius=0.35, min_points=2, max_cluster_diameter=1.2, max_assoc_dist=1.0, vel_alpha=0.6, max_missed_steps=5, static_inflated=None,):
-        self.grid = np.assarray(grid)
+        
+        # Map and clustering/tracking parameters
+        self.grid = np.asarray(grid)
         self.map_h, self.map_w = self.grid.shape
         self.res = float(resolution)
         self.origin_x = float(origin_x)
@@ -20,15 +22,15 @@ class LidarPedestrianTracker
         self.vel_alpha = float(vel_alpha)
         self.max_missed_steps = int(max_missed_steps)
 
-        # Builds static obstacle mask if it hasn't yet been provided
+        # Build boolean static-obstacle mask from provided grid or occupancy convention
         if static_inflated is not None:
             self.static_mask = np.asarray(static_inflated, dtype=bool)
-        elif np.max(self_grid) <= 100 and np.any(self.grid == 100):
+        elif np.max(self.grid) <= 100 and np.any(self.grid == 100):
             self.static_mask = (self.grid >= 50) | (self.grid == -1)
         else:
             self.static_mask = self.grid < 128
 
-        # tracks[track_id] = {"x": float, "y": float, "vx": float, "vy": float, "missed": int}
+        # Active tracks: {track_id: {"x", "y", "vx", "vy", "missed"}}
         self.tracks = {}
         self._next_id = 1
 
@@ -44,15 +46,16 @@ class LidarPedestrianTracker
         if n == 0:
             return np.zeros((0, 2), dtype=float)
 
-        angles = angle_min + np.arrange(n, dtype=float) * angle_increment
-        valid = np.isinfinite(ranges_arr) & (ranges_arr >= range_min) & (ranges_arr <= range_max)
+        # Keep valid range readings within sensor limits
+        angles = angle_min + np.arange(n, dtype=float) * angle_increment
+        valid = np.isfinite(ranges_arr) & (ranges_arr >= range_min) & (ranges_arr <= range_max)
         if not np.any(valid):
             return np.zeros((0, 2), dtype=float)
 
         r_v = ranges_arr[valid]
         a_v = angles[valid]
 
-        # Robot-frame points to wolf frame points
+        # Transform valid points from robot frame to world frame
         lx = r_v * np.cos(a_v)
         ly = r_v * np.sin(a_v)
         rx, ry, rth = float(robot_pose[0]), float(robot_pose[1]), float(robot_pose[2])
@@ -68,6 +71,7 @@ class LidarPedestrianTracker
         if pts.size == 0:
             return np.zeros((0, 2), dtype=float)
 
+        # Look up map cells and drop points on static obstacles
         gx = np.floor((pts[:, 0] - self.origin_x) / self.res).astype(np.int32)
         gy = np.floor((pts[:, 1] - self.origin_y) / self.res).astype(np.int32)
         in_bounds = (gx >= 0) & (gx < self.map_w) & (gy >= 0) & (gy < self.map_h)
@@ -83,14 +87,15 @@ class LidarPedestrianTracker
     def cluster_points(self, dynamic_points):
         """Simple distance-based clustering returning list of (cx, cy)
         detections."""
-        pts = np.asarray(dynamic_point, dtype=float)
-        if len(pts) == 0
+        pts = np.asarray(dynamic_points, dtype=float)
+        if len(pts) == 0:
             return []
 
         visited = np.zeros(len(pts), dtype=bool)
         detections = []
         r2 = self.cluster_radius ** 2
 
+        # BFS grouping of nearby points into candidate detections
         for i in range(len(pts)):
             if visited[i]:
                 continue
@@ -112,29 +117,33 @@ class LidarPedestrianTracker
             if len(member_indices) < self.min_points:
                 continue
 
-            cx = float(np.mean(clust_pts[:, 0]))
+            cx = float(np.mean(cluster_pts[:, 0]))
             cy = float(np.mean(cluster_pts[:, 1]))
             detections.append((cx, cy))
 
         return detections
 
-    def update(self, world_pts, dt=0.1)
-
+    def update(self, world_pts, dt=0.1):
+        """Filter static points, cluster dynamic detections, and update
+        pedestrian tracks"""
         step_dt = max(float(dt), 1e-3)
         dyn_pts = self.filter_static_points(world_points)
         detections = self.cluster_points(dyn_pts)
 
+        # Predict next positions using constant-velocity model
         predicted_xy = {}
         for tid, tr in self.tracks.items():
             predicted_xy[tid] = (tr["x"] + tr["vx"] * step_dt, tr["y"] + tr["vy"] * step_dt)
 
-        unmatched_track = set(self.tracks.keys())
+        # Nearest-neighbor data association and EMA velocity update
+        unmatched_tracks = set(self.tracks.keys())
         observations = []
 
         for det_x, det_y in detections:
             best_tid = None
             best_dist = self.max_assoc_dist
 
+            # Age out tracks that were not matched this step
             for tid in list(unmatched_tracks):
                 px, py = predicted_xy[tid]
                 d = math.hypot(det_x - px, det_y - py)
@@ -174,7 +183,9 @@ class LidarPedestrianTracker
 
 
     def noisy_observations_from_gt(pedestrians, rng, pos_noise_std=0.08, vel_noise_std=0.05):
-
+        """Generate noisy pedestrian observations from ground-truth states"""
+        
+        # Add independent Gaussian noise to ground-truth positions and velocities
         obs = []
         for i, ped in enumerate(pedestrians or [])
             pid = ped.get("name", ped.get("id", f"ped_{i}"))
