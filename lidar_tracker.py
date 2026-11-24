@@ -1,14 +1,13 @@
 import math
 import numpy as np
 
-class LidarPedestrianTracker
+
+class LidarPedestrianTracker:
     """Filters 2D LiDAR points against the static occupancy map, clusters remaining
     foreground points, and tracks pedestrian using nearest-neighbor association
     with a constant-velocity filter."""
 
     def __init__(self, grid, resolution, origin_x, origin_y, cluster_radius=0.35, min_points=2, max_cluster_diameter=1.2, max_assoc_dist=1.0, vel_alpha=0.6, max_missed_steps=5, static_inflated=None,):
-        
-        # Map and clustering/tracking parameters
         self.grid = np.asarray(grid)
         self.map_h, self.map_w = self.grid.shape
         self.res = float(resolution)
@@ -22,7 +21,6 @@ class LidarPedestrianTracker
         self.vel_alpha = float(vel_alpha)
         self.max_missed_steps = int(max_missed_steps)
 
-        # Build boolean static-obstacle mask from provided grid or occupancy convention
         if static_inflated is not None:
             self.static_mask = np.asarray(static_inflated, dtype=bool)
         elif np.max(self.grid) <= 100 and np.any(self.grid == 100):
@@ -30,7 +28,6 @@ class LidarPedestrianTracker
         else:
             self.static_mask = self.grid < 128
 
-        # Active tracks: {track_id: {"x", "y", "vx", "vy", "missed"}}
         self.tracks = {}
         self._next_id = 1
 
@@ -40,13 +37,12 @@ class LidarPedestrianTracker
         self._next_id = 1
 
     def scan_to_world_points(self, ranges, angle_min, angle_increment, robot_pose, range_min=0.05, range_max=10.0):
-        """Converts a 2D LaserScan range array into a world-frame (N, 2) XY poimts"""
+        """Converts a 2D LaserScan range array into a world-frame (N, 2) XY points."""
         ranges_arr = np.asarray(ranges, dtype=float)
         n = len(ranges_arr)
         if n == 0:
             return np.zeros((0, 2), dtype=float)
 
-        # Keep valid range readings within sensor limits
         angles = angle_min + np.arange(n, dtype=float) * angle_increment
         valid = np.isfinite(ranges_arr) & (ranges_arr >= range_min) & (ranges_arr <= range_max)
         if not np.any(valid):
@@ -55,7 +51,6 @@ class LidarPedestrianTracker
         r_v = ranges_arr[valid]
         a_v = angles[valid]
 
-        # Transform valid points from robot frame to world frame
         lx = r_v * np.cos(a_v)
         ly = r_v * np.sin(a_v)
         rx, ry, rth = float(robot_pose[0]), float(robot_pose[1]), float(robot_pose[2])
@@ -65,13 +60,11 @@ class LidarPedestrianTracker
         return np.column_stack((wx, wy))
 
     def filter_static_points(self, world_points):
-        """Remove points that fall on known static obstacles or outside
-        the map"""
+        """Remove points that fall on known static obstacles or outside the map."""
         pts = np.asarray(world_points, dtype=float)
         if pts.size == 0:
             return np.zeros((0, 2), dtype=float)
 
-        # Look up map cells and drop points on static obstacles
         gx = np.floor((pts[:, 0] - self.origin_x) / self.res).astype(np.int32)
         gy = np.floor((pts[:, 1] - self.origin_y) / self.res).astype(np.int32)
         in_bounds = (gx >= 0) & (gx < self.map_w) & (gy >= 0) & (gy < self.map_h)
@@ -85,8 +78,7 @@ class LidarPedestrianTracker
         return pts[keep]
 
     def cluster_points(self, dynamic_points):
-        """Simple distance-based clustering returning list of (cx, cy)
-        detections."""
+        """Simple distance-based clustering returning list of (cx, cy) detections."""
         pts = np.asarray(dynamic_points, dtype=float)
         if len(pts) == 0:
             return []
@@ -95,7 +87,6 @@ class LidarPedestrianTracker
         detections = []
         r2 = self.cluster_radius ** 2
 
-        # BFS grouping of nearby points into candidate detections
         for i in range(len(pts)):
             if visited[i]:
                 continue
@@ -117,6 +108,7 @@ class LidarPedestrianTracker
             if len(member_indices) < self.min_points:
                 continue
 
+            cluster_pts = pts[member_indices]
             cx = float(np.mean(cluster_pts[:, 0]))
             cy = float(np.mean(cluster_pts[:, 1]))
             detections.append((cx, cy))
@@ -124,18 +116,15 @@ class LidarPedestrianTracker
         return detections
 
     def update(self, world_pts, dt=0.1):
-        """Filter static points, cluster dynamic detections, and update
-        pedestrian tracks"""
+        """Filter static points, cluster dynamic detections, and update pedestrian tracks."""
         step_dt = max(float(dt), 1e-3)
         dyn_pts = self.filter_static_points(world_points)
         detections = self.cluster_points(dyn_pts)
 
-        # Predict next positions using constant-velocity model
         predicted_xy = {}
         for tid, tr in self.tracks.items():
             predicted_xy[tid] = (tr["x"] + tr["vx"] * step_dt, tr["y"] + tr["vy"] * step_dt)
 
-        # Nearest-neighbor data association and EMA velocity update
         unmatched_tracks = set(self.tracks.keys())
         observations = []
 
@@ -143,14 +132,12 @@ class LidarPedestrianTracker
             best_tid = None
             best_dist = self.max_assoc_dist
 
-            # Age out tracks that were not matched this step
             for tid in list(unmatched_tracks):
                 px, py = predicted_xy[tid]
                 d = math.hypot(det_x - px, det_y - py)
                 if d <= best_dist:
                     best_dist = d
                     best_tid = tid
-
 
             if best_tid is not None:
                 tr = self.tracks[best_tid]
@@ -166,32 +153,30 @@ class LidarPedestrianTracker
                 tr["missed"] = 0
                 unmatched_tracks.remove(best_tid)
 
-                observations.append({"id": best_tid, "x": det_x, "y": det_y, "vx": vx, "vy": vy,})
+                observations.append({"id": best_tid, "x": det_x, "y": det_y, "vx": vx, "vy": vy})
             else:
-                # Create a new track for an unassociated cluster
                 tid = f"ped_{self._next_id}"
                 self._next_id += 1
-                self.tracks[tid] = {"x": det_x, "y": det_y, "vx": 0.0, "vy": 0.0, "missed": 0,}
-                observations.append({"id": tid, "x": det_x, "y": det_y, "vx": 0.0, "vy": 0.0,})
+                self.tracks[tid] = {"x": det_x, "y": det_y, "vx": 0.0, "vy": 0.0, "missed": 0}
+                observations.append({"id": tid, "x": det_x, "y": det_y, "vx": 0.0, "vy": 0.0})
 
         for tid in list(unmatched_tracks):
             tr = self.tracks[tid]
             tr["missed"] += 1
             if tr["missed"] > self.max_missed_steps:
                 del self.tracks[tid]
+
         return observations
 
 
-    def noisy_observations_from_gt(pedestrians, rng, pos_noise_std=0.08, vel_noise_std=0.05):
-        """Generate noisy pedestrian observations from ground-truth states"""
-        
-        # Add independent Gaussian noise to ground-truth positions and velocities
-        obs = []
-        for i, ped in enumerate(pedestrians or [])
-            pid = ped.get("name", ped.get("id", f"ped_{i}"))
-            x = float(ped["x"]) + float(rng.gauss(0.0, pos_noise_std))
-            y = float(ped["y"]) + float(rng.gauss(0.0, pos_noise_std))
-            vx = float(ped.get("vx", 0.0)) + float(rng.gauss(0.0, vel_noise_std))
-            vy = float(ped.get("vy", 0.0)) + float(rng.gauss(0.0, vel_noise_std))
-            obs.append({"id": pid, "x": x, "y": y, "vx": vx, "vy": vy})
-        return obs
+def noisy_observations_from_gt(gt_pedestrians, rng, pos_std=0.06, vel_std=0.08):
+    """Add Gaussian position and velocity noise to ground-truth pedestrian detections."""
+    obs = []
+    for i, ped in enumerate(gt_pedestrians or []):
+        x = float(ped["x"]) + float(rng.gauss(0.0, pos_std))
+        y = float(ped["y"]) + float(rng.gauss(0.0, pos_std))
+        vx = float(ped.get("vx", 0.0)) + float(rng.gauss(0.0, vel_std))
+        vy = float(ped.get("vy", 0.0)) + float(rng.gauss(0.0, vel_std))
+        entry = {"id": ped.get("name", ped.get("id", f"ped_{i}")), "x": x, "y": y, "vx": vx, "vy": vy, "radius": float(ped.get("radius", 0.25)),}
+        obs.append(entry)
+    return obs

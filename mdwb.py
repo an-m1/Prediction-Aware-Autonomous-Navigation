@@ -104,17 +104,24 @@ class MarkovOccupancyPredictor:
             return self._init_belief(obs_x, obs_y, vx, vy, robot_x, robot_y)
         return posterior / total
 
-    def _propagate_one_step(self, belief):
+    def _propagate_one_step(self, belief, rem_xy=None):
         """Shift probability mass along each motion mode, then apply
         Markov transtion T^T"""
         shifted = np.zeros_like(belief)
         step_cells = (self.speed_mps * self.dt) / self.grid_res
 
-        # Advects each mode's probability plane by its discretized step
-        # offset
+        if rem_xy is None:
+            rem_xy = np.zeros((len(MOTION_MODES), 2), dtype=float)
+
+        # Advects each mode's probability plane by accumulated integer step offset
         for m, (dx_m, dy_m) in enumerate(MOTION_MODES):
-            shift_x = int(round(dx_m * step_cells))
-            shift_y = int(round(dy_m * step_cells))
+            rem_xy[m, 0] += dx_m * step_cells
+            rem_xy[m, 1] += dy_m * step_cells
+            shift_x = int(round(rem_xy[m, 0]))
+            shift_y = int(round(rem_xy[m, 1]))
+            rem_xy[m, 0] -= shift_x
+            rem_xy[m, 1] -= shift_y
+
             plane = belief[:, :, m]
             if not np.any(plane):
                 continue
@@ -156,31 +163,31 @@ class MarkovOccupancyPredictor:
                 vx = float(obs.get("vx", (ox - prev["pos"][0]) / max(step_dt, 1e-3)))
                 vy = float(obs.get("vy", (oy - prev["pos"][1]) / max(step_dt, 1e-3)))
 
-                prior = self._propagate_one_step(prev["belief"])
+                prior = self._propagate_one_step(prev["belief"], prev["rem_xy"])
                 belief = self._bayes_update(prior, ox, oy, vx, vy, robot_x, robot_y)
-                self.tracks[ped_id] = {"pos": np.array([ox, oy]), "vel": np.array([vx, vy]), "belief": belief,}
+                self.tracks[ped_id] = {"pos": np.array([ox, oy]), "vel": np.array([vx, vy]), "belief": belief, "rem_xy": prev["rem_xy"],}
             else:
                 vx = float(obs.get("vx", 0.0))
                 vy = float(obs.get("vy", 0.0))
                 belief = self._init_belief(ox, oy, vx, vy, robot_x, robot_y)
-                self.tracks[ped_id] = {"pos": np.array([ox, oy]), "vel": np.array([vx, vy]), "belief": belief,}
+                self.tracks[ped_id] = {"pos": np.array([ox, oy]), "vel": np.array([vx, vy]), "belief": belief, "rem_xy": np.zeros((len(MOTION_MODES), 2), dtype=float),}
 
             matched_ids.add(ped_id)
 
         # Open-Loop propagation for tracks without a current observation
         for ped_id, track in list(self.tracks.items()):
             if ped_id not in matched_ids:
-                track["belief"] = self._propagate_one_step(track["belief"])
+                track["belief"] = self._propagate_one_step(track["belief"], track["rem_xy"])
 
         # Roll out multi-step occupancy heatmaps across all
         # tracked pedestrians
         heatmaps = []
-        current_beliefs = {pid: tr["belief"].copy() for pid, tr in self.tracks.items()}
+        current_beliefs = {pid: (tr["belief"].copy(), tr["rem_xy"].copy()) for pid, tr in self.tracks.items()}
         for _ in range(self.horizon_steps):
             combined_occ = np.zeros((self.n_cells, self.n_cells), dtype=float)
-            for pid, b_step in current_beliefs.items():
-                next_b = self._propagate_one_step(b_step)
-                current_beliefs[pid] = next_b
+            for pid, (b_step, rem_step) in current_beliefs.items():
+                next_b = self._propagate_one_step(b_step, rem_step)
+                current_beliefs[pid] = (next_b, rem_step)
 
                 occ = np.clip(np.sum(next_b, axis=-1), 0.0, 1.0)
 
@@ -301,7 +308,10 @@ class MDWBLocalPlanner(DWBLocalPlanner):
 
         # Sample candidate linear/angular velocities and roll out trajectories
         if self.cruise_speed_mps is not None:
-            v_cand = np.array([self.cruise_speed_mps if heading_err <= 0.35 else 0.0])
+            if heading_err <= 0.35:
+                v_cand = np.linspace(max(self.min_vel_x, 0.0), self.cruise_speed_mps, max(3, min(self.vx_samples, 5)))
+            else:
+                v_cand = np.array([0.0])
         else:
             effective_v_max = v_max * max(0.1, math.cos(min(heading_err, math.pi / 2)))
             v_cand = np.linspace(v_min, effective_v_max, self.vx_samples)
